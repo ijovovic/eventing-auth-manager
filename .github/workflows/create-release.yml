@@ -20,6 +20,10 @@ on:
         description: 'Do not publish'
         default: false
 
+permissions:
+  id-token: write # Required for image-builder OIDC
+  contents: read
+
 jobs:
   validate-release:
     name: Validate release
@@ -113,6 +117,8 @@ jobs:
     name: Create draft release
     needs: [ validate-release ]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout code
@@ -120,20 +126,17 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
-          token: ${{ secrets.BOT_TOKEN }} # creating git tag using bot token because GITHUB_TOKEN would not trigger build workflow (https://docs.github.com/en/actions/using-workflows/triggering-a-workflow#triggering-a-workflow-from-a-workflow).
 
       - name: Create draft release
         id: create-draft
         env:
-          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository_owner }}/eventing-auth-manager
         run: |
           RELEASE_ID=$(./hack/scripts/create_draft_release.sh ${{ github.event.inputs.name }})
           echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
 
       - name: Create lightweight tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           git tag ${{ github.event.inputs.name }}
           git push origin ${{ github.event.inputs.name }}
@@ -141,45 +144,21 @@ jobs:
     outputs:
       release_id: ${{ steps.create-draft.outputs.release_id }}
 
-  wait-for-build-job:
-    name: Wait for prow jobs
+  build-image:
+    name: Build release image
     needs: [ create-draft ]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout eventing-tools
-        uses: actions/checkout@v4
-        with:
-          repository: 'kyma-project/eventing-tools'
-          path: 'kyma-project/eventing-tools'
-          ref: main
-          sparse-checkout: 'scripts/wait-for-commit-check'
-
-      - name: Setup python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
-
-      - name: Install requirements
-        run: |
-          pip install -r $GITHUB_WORKSPACE/kyma-project/eventing-tools/scripts/wait-for-commit-check/requirements.txt
-
-      - name: wait for build
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY_FULL_NAME: ${{ github.repository_owner }}/eventing-auth-manager
-          GIT_REF: ${{ inputs.name }}
-          # The re-usable image-builder workflow from neighbors appends the "Build image" suffix to the check run name.
-          GIT_CHECK_RUN_NAME: "build-${{ inputs.name }} / Build image"
-          INTERVAL: 60
-          TIMEOUT: 900
-        run: |
-          python $GITHUB_WORKSPACE/kyma-project/eventing-tools/scripts/wait-for-commit-check/run.py
+    uses: kyma-project/test-infra/.github/workflows/image-builder.yml@main
+    with:
+      name: eventing-auth-manager
+      dockerfile: Dockerfile
+      context: .
+      tags: |
+        ${{ github.sha }}
+        ${{ inputs.name }}
 
   check-prerequisites:
     name: Check release pre-requisites
-    needs: [ create-draft, ias-integration-test, wait-for-build-job]
+    needs: [ create-draft, ias-integration-test, build-image ]
     runs-on: ubuntu-latest
 
     steps:
@@ -196,6 +175,8 @@ jobs:
     needs: [ create-draft, check-prerequisites ]
     if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout code
